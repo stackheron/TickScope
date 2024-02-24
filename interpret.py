@@ -77,3 +77,20 @@ def parse_project(path):
     return systems
 
 
+def read_entries_bin(path):
+    data = open(path, "rb").read()
+    n = len(data) // 4
+    return list(struct.unpack(f"<{n}I", data[: n * 4]))
+
+
+def read_entries_rawcsv(path):
+    entries = []
+    with open(path, encoding="utf-8-sig") as f:
+        col = f.readline().rstrip("\n").split(";").index("Raw Trace Entry")
+        for line in f:
+            p = line.rstrip("\n").split(";")
+            if len(p) > col and p[col]:
+                entries.append(int(p[col], 16))
+    return entries
+
+
