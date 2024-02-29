@@ -94,3 +94,13 @@ def read_entries_rawcsv(path):
     return entries
 
 
+def reorder_ring(entries):
+    """Rotate a ring-order buffer so the DISCONTINUITY marker (write pointer) is
+    last -> chronological order. Returns entries unchanged if no discontinuity."""
+    disc = [i for i, e in enumerate(entries) if ((e >> 10) & 0x3F) == 15]
+    if not disc:
+        return entries, False
+    start = (disc[-1] + 1) % len(entries)
+    return entries[start:] + entries[:start], True
+
+
