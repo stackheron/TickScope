@@ -104,3 +104,38 @@ def reorder_ring(entries):
     return entries[start:] + entries[:start], True
 
 
+def fmt_time(ns):
+    s, rem = divmod(ns, 1_000_000_000)
+    ms, rem = divmod(rem, 1_000_000)
+    us, z = divmod(rem, 1000)
+    if s:
+        return f"{s}s {ms:03d}ms {us:03d}us {z:03d}ns"
+    if ms:
+        return f"{ms}ms {us:03d}us {z:03d}ns"
+    if us:
+        return f"{us}us {z:03d}ns"
+    return f"{z}ns"
+
+
+def _gap_wraps(entries, i, hint, delta, tick, wrap):
+    """Timestamp wraps lost in a dropped-datagram gap before entries[i].
+
+    hint = (q, elapsed_ns): q indexes the last entry of the frame that starts at i
+    and elapsed_ns is the capture-clock time between the last entry before the gap and
+    entries[q]. The trace itself covers delta (gap edge) + span (i..q) ticks of that;
+    whatever remains, rounded to whole wrap periods, was lost in the gap."""
+    q, elapsed_ns = hint
+    if tick <= 0:
+        return 0
+    span = 0
+    prev = (entries[i] >> 16) & 0xFFFF
+    for e in entries[i + 1:q + 1]:
+        ev = (e >> 10) & 0x3F
+        if ev == 15 or ev in SYNC_CONT:
+            continue
+        ts = (e >> 16) & 0xFFFF
+        span += (ts - prev) % wrap
+        prev = ts
+    return max(0, round((elapsed_ns / tick - delta - span) / wrap))
+
+
