@@ -139,3 +139,89 @@ def _gap_wraps(entries, i, hint, delta, tick, wrap):
     return max(0, round((elapsed_ns / tick - delta - span) / wrap))
 
 
+def interpret(entries, sysinfo, buf_base=None, start_pos=0, gap_hints=None):
+    """entries must be in chronological order. Returns list of column dicts.
+
+    gap_hints (optional, stream captures): {entry_index: (q, elapsed_ns)} at each
+    dropped-datagram gap, used to recover timestamp wraps lost in the gap."""
+    if not entries:
+        raise ValueError("no trace entries")
+    gap_hints = gap_hints or {}
+    tick, wrap = sysinfo["tick"], sysinfo["wrap"]
+    tasks = sysinfo["by_type"].get("Task", {})
+    name = sysinfo["name"]
+    sid = sysinfo.get("sid", "")
+    n = len(entries)
+    rows = []
+    prev_ts = None
+    abs_ticks = 0
+    base = None
+    last_time = 0
+
+    def blank():
+        return {c: "" for c in COLS}
+
+    # synthetic InternalStart: state at trace start = first entry's element
+    first = entries[0]
+    r = blank()
+    r.update({"Index": 0, "Time (Ns)": 0, "Time": "0ns", "Event Type": "InternalStart",
+              "Element Name": tasks.get(first & 0x3FF, ""), "System": name,
+              "Ref. Raw Index": 1, "System Id": sid, "Task Id": first & 0x3FF})
+    rows.append(r)
+
+    i = 0
+    while i < n:
+        e = entries[i]
+        ts, ev, info = (e >> 16) & 0xFFFF, (e >> 10) & 0x3F, e & 0x3FF
+        raw_index = i + 1
+        if ev == 15:
+            time_ns = last_time
+        else:
+            if prev_ts is None:
+                abs_ticks = ts
+            else:
+                delta = (ts - prev_ts) % wrap
+                if i in gap_hints:
+                    delta += wrap * _gap_wraps(entries, i, gap_hints[i], delta, tick, wrap)
+                abs_ticks += delta
+            if base is None:
+                base = abs_ticks
+            time_ns = int(round((abs_ticks - base) * tick))
+            prev_ts, last_time = ts, time_ns
+        raw_evt, evt = EVENTS.get(ev, (f"EVENT_{ev}", f"Event{ev}"))
+
+        r = blank()
+        r.update({"Index": len(rows), "Time (Ns)": time_ns, "Time": fmt_time(time_ns),
+                  "Event Type": evt, "Trace Info": f"0x{info:03X}", "System": name,
+                  "Raw Index": raw_index, "Raw Trace Entry": f"0x{e:08X}",
+                  "Raw Time": ts, "Raw Event Type": raw_evt, "Event Id": ev,
+                  "System Id": sid})
+        if buf_base is not None:
+            r["Trace Buffer Address"] = f"0x{buf_base + ((start_pos + i) % n) * 4:08X}"
+        if ev in SCHED_EVENTS:
+            r["Element Name"] = tasks.get(info, "")
+            r["Task Id"] = info
+        elif ev == 15:
+            r["Discontinuity Type"] = "Tracing halted"
+        elif ev == 18:
+            # fold sync-data continuations into a 32-bit sync timer value:
+            # low 16 bits = this ts, next carriers supply the upper bytes.
+            sync = ts
+            shift = 16
+            j = i + 1
+            while j < n and ((entries[j] >> 10) & 0x3F) in SYNC_CONT:
+                sync |= (entries[j] & 0xFF) << shift
+                shift += 8
+                j += 1
+            r["Sync Data Time"] = sync & 0xFFFFFFFF
+            i = j - 1  # consume the folded carriers
+        rows.append(r)
+        i += 1
+
+    r = blank()
+    r.update({"Index": len(rows), "Time (Ns)": last_time, "Time": fmt_time(last_time),
+              "Event Type": "EndOfTrace", "System": name, "System Id": sid})
+    rows.append(r)
+    return rows
+
+
