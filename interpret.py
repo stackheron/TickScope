@@ -225,3 +225,49 @@ def interpret(entries, sysinfo, buf_base=None, start_pos=0, gap_hints=None):
     return rows
 
 
+def main():
+    ap = argparse.ArgumentParser(description="Interpret a raw trace block")
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--sid", type=int, default=2, help="system id (project SID)")
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument("--bin", help="raw trace block (uint32 LE)")
+    src.add_argument("--raw-csv", help="an exported RawTraceData.csv")
+    ap.add_argument("--no-reorder", action="store_true",
+                    help="input is already chronological (e.g. a RawTraceData.csv)")
+    ap.add_argument("--buf-base", type=lambda s: int(s, 0), default=None,
+                    help="&traceBuffer[0] for the Trace Buffer Address column")
+    ap.add_argument("--out", required=True)
+    args = ap.parse_args()
+
+    systems = parse_project(args.project)
+    if args.sid not in systems:
+        print(f"ERROR: SID {args.sid} not in the project file (have {sorted(systems)})", file=sys.stderr)
+        return 2
+    sysinfo = systems[args.sid]
+    sysinfo["sid"] = args.sid
+
+    entries = read_entries_bin(args.bin) if args.bin else read_entries_rawcsv(args.raw_csv)
+    if not entries:
+        print(f"ERROR: no trace entries in {args.bin or args.raw_csv}", file=sys.stderr)
+        return 2
+    reordered = False
+    start_pos = 0
+    if not args.no_reorder and not args.raw_csv:
+        disc = [i for i, e in enumerate(entries) if ((e >> 10) & 0x3F) == 15]
+        if disc:
+            start_pos = (disc[-1] + 1) % len(entries)
+            entries, reordered = reorder_ring(entries)
+
+    rows = interpret(entries, sysinfo, args.buf_base, start_pos)
+    with open(args.out, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(";".join(COLS) + "\n")
+        for r in rows:
+            f.write(";".join(str(r[c]) for c in COLS) + "\n")
+    print(f"[interpret] {len(rows)} rows -> {args.out}  (system {sysinfo['name']}, "
+          f"tick {sysinfo['tick']}ns, {len(sysinfo['by_type'].get('Task', {}))} tasks, "
+          f"ring-reordered={reordered})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
