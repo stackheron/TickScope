@@ -13,3 +13,16 @@ task table, BSF event).
 | `interpret.py`     | RawTraceData CSV or raw `.bin` trace block | InterpretedTraceData CSV |
 | `posix_report.py`         | `.pcapng`/`.pcap` of a POSIX/QNX trace stream | per-CPU and per-process/thread BSF CPU-load report |
 
+## Quick start
+
+```sh
+# capture -> InterpretedTraceData + timing report (CSV + HTML) in one go
+python3 stream_to_csv.py --pcap stream.pcapng --project PROJ.xml --report --html
+
+# report from an existing InterpretedTraceData CSV (e.g. exported by a host tool)
+python3 timing_report.py --interp trace_InterpretedTraceData.csv --project PROJ.xml --html
+
+# RawTraceData CSV -> InterpretedTraceData
+python3 interpret.py --project PROJ.xml --sid 2 --raw-csv trace_RawTraceData.csv --out trace.csv
+```
+
