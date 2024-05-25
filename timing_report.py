@@ -79,3 +79,71 @@ def pct_dot(x):
     return _pct(x, ".")
 
 
+def parse_project_elements(path):
+    """Return {sid: {name: {'id','prio','type'}}} for every <System>."""
+    xml = open(path, encoding="utf-8-sig").read()
+    starts = [m.start() for m in re.finditer(r"<System\b", xml)] + [len(xml)]
+    systems = {}
+    for i in range(len(starts) - 1):
+        body = xml[starts[i]:starts[i + 1]]
+        tag = re.match(r"<System\b[^>]*>", body)
+        sid = int(dict(re.findall(r'(\w+)="([^"]*)"', tag.group(0))).get("SID", "-1")) if tag else -1
+        elems = {}
+        for m in re.finditer(r"<SystemElement\b[^>]*>", body):
+            a = dict(re.findall(r'(\w+)="([^"]*)"', m.group(0)))
+            if a.get("Type") == "Task" and "Name" in a:
+                elems[a["Name"]] = {"id": a.get("ID", ""), "prio": a.get("Priority", ""),
+                                    "type": a.get("Type", "Task")}
+        systems[sid] = elems
+    return systems
+
+
+def parse_bsf_task(path, sid):
+    """Return the name of the task whose activation defines the BSF frame, or None."""
+    xml = open(path, encoding="utf-8-sig").read()
+    starts = [m.start() for m in re.finditer(r"<System\b", xml)] + [len(xml)]
+    for i in range(len(starts) - 1):
+        body = xml[starts[i]:starts[i + 1]]
+        tag = re.match(r"<System\b[^>]*>", body)
+        s = int(dict(re.findall(r'(\w+)="([^"]*)"', tag.group(0))).get("SID", "-1")) if tag else -1
+        if s != sid:
+            continue
+        m = re.search(r"<BasicSchedulingFrameEvent[^>]*SystemElementID=\"(\d+)\"", body)
+        if not m:
+            return None
+        bid = m.group(1)
+        for em in re.finditer(r"<SystemElement\b[^>]*>", body):
+            a = dict(re.findall(r'(\w+)="([^"]*)"', em.group(0)))
+            if a.get("Type") == "Task" and a.get("ID") == bid:
+                return a.get("Name")
+    return None
+
+
+def _tick_from_project(path, sid):
+    xml = open(path, encoding="utf-8-sig").read()
+    for m in re.finditer(r"<System\b[^>]*>", xml):
+        a = dict(re.findall(r'(\w+)="([^"]*)"', m.group(0)))
+        if int(a.get("SID", "-1")) == sid:
+            return float(a.get("TickDuration", "0"))
+    return 0.0
+
+
+def _bid_from_project(path, sid):
+    """Return the <System> BID (decimal string) for sid, or None."""
+    xml = open(path, encoding="utf-8-sig").read()
+    for m in re.finditer(r"<System\b[^>]*>", xml):
+        a = dict(re.findall(r'(\w+)="([^"]*)"', m.group(0)))
+        if int(a.get("SID", "-1")) == sid and a.get("BID"):
+            return a["BID"]
+    return None
+
+
+def _decode_bid(bid):
+    """Format a build id (project <System BID>) as 'NNN (0xHEX)'."""
+    try:
+        v = int(bid)
+    except (TypeError, ValueError):
+        return None
+    return f"{v} (0x{v:08X})"
+
+
