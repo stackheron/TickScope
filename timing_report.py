@@ -147,3 +147,54 @@ def _decode_bid(bid):
     return f"{v} (0x{v:08X})"
 
 
+def events_from_interp_csv(path):
+    """Return (events, sid, sysname, captured); events = [(time_ns, event, element)].
+
+    captured = the first non-empty 'Timestamp' (wall-clock) cell if the CSV carries one
+    (host-generated traces annotate sync rows with it), else '' ."""
+    events, sid, sysname, captured = [], None, "", ""
+    with open(path, encoding="utf-8-sig") as f:
+        h = f.readline().rstrip("\r\n").split(";")
+        ti, ei, eli = h.index("Time (Ns)"), h.index("Event Type"), h.index("Element Name")
+        sii = h.index("System Id") if "System Id" in h else None
+        syi = h.index("System") if "System" in h else None
+        tsi = h.index("Timestamp") if "Timestamp" in h else None
+        for line in f:
+            p = line.rstrip("\r\n").split(";")
+            if len(p) <= eli:
+                continue
+            events.append((int(p[ti]) if p[ti] else 0, p[ei], p[eli]))
+            if sid is None and sii is not None and p[sii]:
+                sid = int(p[sii])
+            if not sysname and syi is not None and p[syi]:
+                sysname = p[syi]
+            if not captured and tsi is not None and len(p) > tsi and p[tsi]:
+                captured = p[tsi]
+    return events, sid, sysname, captured
+
+
+def _fmt_dur(ns):
+    """Human trace duration, e.g. '5.9035 s' / '842.10 ms'."""
+    if ns >= 1_000_000_000:
+        return f"{ns / 1e9:.4f} s"
+    if ns >= 1_000_000:
+        return f"{ns / 1e6:.2f} ms"
+    return f"{ns / 1e3:.1f} us"
+
+
+def _build_meta(source, project, events, captured, sid=None):
+    ts = [e[0] for e in events]
+    dur = (max(ts) - min(ts)) if ts else 0
+    bid = _decode_bid(_bid_from_project(project, sid)) if (project and sid is not None) else None
+    return {"source": os.path.basename(source) if source else "",
+            "project": os.path.basename(project) if project else "",
+            "duration": dur, "captured": captured or "",
+            "bid": bid or ""}
+
+
+def events_from_interp_rows(rows):
+    """Adapt interpret.interpret() output dicts -> (time, event, element) tuples."""
+    return [(int(r["Time (Ns)"]) if r["Time (Ns)"] != "" else 0,
+             r["Event Type"], r["Element Name"]) for r in rows]
+
+
