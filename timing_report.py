@@ -198,3 +198,87 @@ def events_from_interp_rows(rows):
              r["Event Type"], r["Element Name"]) for r in rows]
 
 
+def compute_stats(events, tick, compensate=True):
+    """Return (stats, intervals).
+
+    stats[element] = {'count','cet','dt','rt','st','acts'} (lists of ns).
+    intervals = [(start, end, element, scale)] running segments; scale distributes each
+    job's CET overhead compensation across its segments (scale=1 when compensate=False).
+    """
+    cet_out = defaultdict(list)
+    rt = defaultdict(list)
+    acts = defaultdict(list)
+    jobseq = defaultdict(list)          # (act_t, stop_t) per job
+    intervals = []
+    openj = {}
+    pending_act = {}
+    running = [None]
+    last_t = [events[0][0] if events else 0]
+
+    def charge(t):
+        d = t - last_t[0]
+        if running[0] is not None and d and running[0] in openj:
+            openj[running[0]]["cet"] += d
+        last_t[0] = t
+
+    for t, ev, el in events:
+        if ev in _SKIP:
+            charge(t)
+            continue
+        charge(t)
+        if ev == "Activation":
+            acts[el].append(t)
+            pending_act[el] = t
+        elif ev == "Start":
+            openj[el] = {"cet": 0, "nwait": 0, "act": pending_act.pop(el, None),
+                         "segs": [], "seg": t}
+            running[0] = el
+        elif ev == "Resume":
+            j = openj.get(el)
+            if j is None:
+                openj[el] = {"cet": 0, "nwait": 0, "act": None, "segs": [], "seg": t}
+            else:
+                j["seg"] = t
+            running[0] = el
+        elif ev == "Wait":
+            if running[0] == el:
+                running[0] = None
+            j = openj.get(el)
+            if j is not None:
+                j["nwait"] += 1
+                if j["seg"] is not None:
+                    j["segs"].append((j["seg"], t))
+                    j["seg"] = None
+        elif ev == "Stop":
+            if running[0] == el:
+                running[0] = None
+            j = openj.pop(el, None)
+            if j is not None:
+                if j["seg"] is not None:
+                    j["segs"].append((j["seg"], t))
+                cet = j["cet"]
+                comp = tick * (2 + 4 * j["nwait"]) if compensate else 0
+                eff = max(0, cet - comp)
+                scale = (eff / cet) if cet > 0 else 0.0
+                cet_out[el].append(eff)
+                for s, e in j["segs"]:
+                    intervals.append((s, e, el, scale))
+                if j["act"] is not None:
+                    rt[el].append(t - j["act"])
+                jobseq[el].append((j["act"], t))
+
+    dt = {el: [a[i] - a[i - 1] for i in range(1, len(a))] for el, a in acts.items()}
+    st = defaultdict(list)
+    for el, js in jobseq.items():
+        for i in range(1, len(js)):
+            if js[i][0] is not None:
+                st[el].append(js[i][0] - js[i - 1][1])
+
+    stats = {}
+    for el in set(cet_out) | set(acts):
+        stats[el] = {"count": len(cet_out.get(el, [])), "cet": cet_out.get(el, []),
+                     "dt": dt.get(el, []), "rt": rt.get(el, []), "st": st.get(el, []),
+                     "acts": acts.get(el, [])}
+    return stats, intervals
+
+
