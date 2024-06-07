@@ -282,3 +282,39 @@ def compute_stats(events, tick, compensate=True):
     return stats, intervals
 
 
+def bsf_frames(stats, bsf_name):
+    """Frames = consecutive activations of the BSF task -> [(start, end)]."""
+    a = stats.get(bsf_name, {}).get("acts", [])
+    return [(a[i], a[i + 1]) for i in range(len(a) - 1)]
+
+
+def bsf_loads(intervals, frames):
+    """Return ({element: [load% per frame]}, [system load% per frame])."""
+    if not frames:
+        return {}, []
+    fstart = [a for a, _ in frames]
+    per = defaultdict(lambda: defaultdict(float))
+    sysf = defaultdict(float)
+    for a, b, el, scale in intervals:
+        if b <= a or scale <= 0:
+            continue
+        fi = bisect.bisect_right(fstart, a) - 1
+        if fi < 0:
+            fi = 0
+        while fi < len(frames) and frames[fi][0] < b:
+            fa, fb = frames[fi]
+            ov = min(b, fb) - max(a, fa)
+            if ov > 0:
+                per[el][fi] += ov * scale
+                sysf[fi] += ov * scale
+            fi += 1
+    durs = [fb - fa for fa, fb in frames]
+    loads = {}
+    for el, fm in per.items():
+        loads[el] = [100.0 * fm.get(i, 0.0) / durs[i] if durs[i] else 0.0
+                     for i in range(len(frames))]
+    sysload = [100.0 * sysf.get(i, 0.0) / durs[i] if durs[i] else 0.0
+               for i in range(len(frames))]
+    return loads, sysload
+
+
