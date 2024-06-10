@@ -318,3 +318,30 @@ def bsf_loads(intervals, frames):
     return loads, sysload
 
 
+def _order_by_prio(stats, elems):
+    """Sort elements by priority (highest first); busiest-first within equal priority."""
+    def key(el):
+        p = str(elems.get(el, {}).get("prio", ""))
+        pr = int(p) if p.lstrip("-").isdigit() else -1
+        return (-pr, -sum(stats[el]["cet"]))
+    return sorted(stats, key=key)
+
+
+_COLS = ["Name", "Type", "ID", "Priority", "Count",
+         "CET Min", "CET Avg", "CET Max", "DT Min", "DT Avg", "DT Max",
+         "RT Min", "RT Avg", "RT Max", "ST Min", "ST Avg", "ST Max",
+         "CPU Load Min [%]", "CPU Load Avg [%]", "CPU Load Max [%]"]
+
+
+def _mmm_t(vals):
+    if not vals:
+        return ["n/a", "n/a", "n/a"]
+    return [fmt_ns(min(vals)), fmt_ns(sum(vals) / len(vals)), fmt_ns(max(vals))]
+
+
+def _mmm_pct(vals):
+    if not vals:
+        return ["n/a", "n/a", "n/a"]
+    return [pct_de(min(vals)), pct_de(sum(vals) / len(vals)), pct_de(max(vals))]
+
+
