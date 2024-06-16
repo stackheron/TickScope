@@ -345,3 +345,112 @@ def _mmm_pct(vals):
     return [pct_de(min(vals)), pct_de(sum(vals) / len(vals)), pct_de(max(vals))]
 
 
+def write_report(stats, intervals, elems, bsf_name, sysname, path, meta=None):
+    """Write the per-element CET/DT/RT/ST + BSF CPU-load table (priority-sorted)."""
+    meta = meta or {}
+    frames = bsf_frames(stats, bsf_name)
+    loads, sysload = bsf_loads(intervals, frames)
+    order = _order_by_prio(stats, elems)
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(f"System;{sysname}\n")
+        if meta.get("source"):
+            f.write(f"Source;{meta['source']}\n")
+        if meta.get("project"):
+            f.write(f"Project;{meta['project']}\n")
+        if meta.get("bid"):
+            f.write(f"Expected BID;{meta['bid']}\n")
+        if meta.get("duration"):
+            f.write(f"Trace duration;{_fmt_dur(meta['duration'])}\n")
+        if meta.get("captured"):
+            f.write(f"Captured;{meta['captured']}\n")
+        if frames:
+            avg_ms = sum(fb - fa for fa, fb in frames) / len(frames) / 1e6
+            f.write(f"BSF event;{bsf_name or '?'};frames;{len(frames)};avg period;{avg_ms:.3f}ms\n")
+            if sysload:
+                f.write(f"BSF CPU load min [%];{pct_de(min(sysload))};"
+                        f"average [%];{pct_de(sum(sysload)/len(sysload))};"
+                        f"max [%];{pct_de(max(sysload))}\n")
+        else:
+            f.write("BSF event;(none - no CPU load computed)\n")
+        f.write(";".join(_COLS) + "\n")
+        for el in order:
+            s = stats[el]
+            emeta = elems.get(el, {"id": "", "prio": "", "type": "Task"})
+            name = f"{el} ID:{emeta['id']} prio:{emeta['prio']}" if emeta["id"] != "" else el
+            row = [name, emeta.get("type", "Task"), emeta["id"], emeta["prio"], s["count"]]
+            row += _mmm_t(s["cet"]) + _mmm_t(s["dt"]) + _mmm_t(s["rt"]) + _mmm_t(s["st"])
+            row += _mmm_pct(loads.get(el)) if frames else ["n/a", "n/a", "n/a"]
+            f.write(";".join(str(x) for x in row) + "\n")
+    return len(order)
+
+
+_HTML_CSS = r"""
+:root{--bg:#fff;--fg:#1b1f24;--muted:#6b7280;--line:#e5e7eb;--head:#f7f8fa;
+  --zebra:#fafbfc;--accent:#2563eb;--bar:#dbeafe;--grp:#cbd5e1;--chip:#f1f5f9;}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1115;--fg:#e6e8eb;--muted:#9aa4b2;
+  --line:#262b34;--head:#171b22;--zebra:#141821;--accent:#60a5fa;--bar:#1d3350;
+  --grp:#3a424f;--chip:#1a1f28;}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);
+  font:14px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;}
+.wrap{padding:24px;max-width:100%;}
+h1{font-size:19px;margin:0 0 2px;font-weight:650;}
+.sub{color:var(--muted);font-size:13px;margin-bottom:12px;}
+.meta{border-collapse:collapse;margin:0 0 18px;font-size:12.5px;}
+.meta td{border-bottom:none;padding:2px 18px 2px 0;white-space:nowrap;vertical-align:top;}
+.meta td.k{color:var(--muted);text-transform:uppercase;font-size:10.5px;letter-spacing:.04em;}
+.meta td.v{color:var(--fg);font-weight:600;word-break:break-word;}
+.cards{display:flex;flex-wrap:wrap;gap:10px;margin-bottom:18px;}
+.card{border:1px solid var(--line);border-radius:8px;padding:9px 13px;min-width:110px;background:var(--chip);}
+.card .k{color:var(--muted);font-size:10.5px;text-transform:uppercase;letter-spacing:.04em;}
+.card .v{font-size:17px;font-weight:640;margin-top:3px;font-variant-numeric:tabular-nums;}
+.tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:8px;}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums;}
+th,td{padding:6px 10px;border-bottom:1px solid var(--line);white-space:nowrap;}
+thead th{position:sticky;top:0;background:var(--head);z-index:2;font-size:12px;font-weight:600;}
+thead tr:first-child th{border-bottom:1px solid var(--line);}
+th.sortable{cursor:pointer;user-select:none;}
+th.sortable:hover{color:var(--accent);}
+th.sortable:hover::after{content:"\2195";margin-left:4px;font-size:9px;opacity:.5;}
+th.sortable.asc::after{content:"\25B2";margin-left:4px;font-size:9px;opacity:1;}
+th.sortable.desc::after{content:"\25BC";margin-left:4px;font-size:9px;opacity:1;}
+th.grp{text-align:center;color:var(--muted);text-transform:uppercase;letter-spacing:.03em;font-size:11px;}
+.gl{border-left:2px solid var(--grp);}
+td.num,th.num{text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12px;}
+td.name{text-align:left;font-weight:550;}
+tbody tr:nth-child(even){background:var(--zebra);}
+tbody tr:hover{background:var(--chip);}
+.muted{color:var(--muted);}
+.bar{position:relative;overflow:hidden;}
+.bar>i{position:absolute;left:0;top:0;bottom:0;background:var(--bar);z-index:0;}
+.bar>b{position:relative;z-index:1;font-weight:500;}
+footer{color:var(--muted);font-size:12px;margin-top:16px;line-height:1.6;}
+footer code{background:var(--chip);padding:1px 5px;border-radius:4px;}
+"""
+
+_HTML_JS = r"""<script>
+(function(){
+  var t=document.getElementById('report'); if(!t) return;
+  var tb=t.tBodies[0], hs=t.querySelectorAll('th.sortable'), cc=-1, cd=1;
+  function val(tr,c,s){
+    var td=tr.children[c];
+    if(td.dataset.sort!==undefined && td.dataset.sort!=='') return parseFloat(td.dataset.sort);
+    if(s) return td.textContent.trim().toLowerCase();
+    var n=parseFloat(td.textContent.replace(/[^0-9.eE-]/g,''));
+    return isNaN(n)?-Infinity:n;
+  }
+  function sortBy(c,s,th){
+    var d=(c===cc)?-cd:(s?1:-1); cc=c; cd=d;
+    var rows=Array.prototype.slice.call(tb.rows);
+    rows.sort(function(a,b){var x=val(a,c,s),y=val(b,c,s);return (x<y?-1:x>y?1:0)*d;});
+    rows.forEach(function(r){tb.appendChild(r);});
+    hs.forEach(function(h){h.classList.remove('asc','desc');});
+    th.classList.add(d>0?'asc':'desc');
+  }
+  hs.forEach(function(h){
+    h.addEventListener('click',function(){sortBy(parseInt(h.dataset.col,10), h.dataset.type==='str', h);});
+  });
+})();
+</script>"""
+
+
