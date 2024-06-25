@@ -454,3 +454,127 @@ _HTML_JS = r"""<script>
 </script>"""
 
 
+def _numstats(vals):
+    return (min(vals), sum(vals) / len(vals), max(vals)) if vals else None
+
+
+def write_html(stats, intervals, elems, bsf_name, sysname, path, compensated=True, meta=None):
+    """Write a self-contained styled HTML timing report."""
+    meta = meta or {}
+    frames = bsf_frames(stats, bsf_name)
+    loads, sysload = bsf_loads(intervals, frames)
+    order = _order_by_prio(stats, elems)
+    esc = _htmlmod.escape
+    avg_ms = (sum(fb - fa for fa, fb in frames) / len(frames) / 1e6) if frames else 0.0
+    max_avg = 0.0
+    for el in order:
+        lv = loads.get(el)
+        if lv:
+            max_avg = max(max_avg, sum(lv) / len(lv))
+
+    def tcells(trip, gl):
+        c0 = "num gl" if gl else "num"
+        if not trip:
+            return (f'<td class="{c0} muted">n/a</td>'
+                    f'<td class="num muted">n/a</td><td class="num muted">n/a</td>')
+        return (f'<td class="{c0}" data-sort="{int(round(trip[0]))}">{fmt_ns(trip[0])}</td>'
+                f'<td class="num" data-sort="{int(round(trip[1]))}">{fmt_ns(trip[1])}</td>'
+                f'<td class="num" data-sort="{int(round(trip[2]))}">{fmt_ns(trip[2])}</td>')
+
+    body = []
+    for el in order:
+        s = stats[el]
+        emeta = elems.get(el, {"id": "", "prio": "", "type": "Task"})
+        lv = loads.get(el)
+        cpu = _numstats(lv) if lv else None
+        if cpu:
+            w = (100.0 * cpu[1] / max_avg) if max_avg > 0 else 0.0
+            cpu_html = (f'<td class="num gl">{pct_dot(cpu[0])}</td>'
+                        f'<td class="num bar"><i style="width:{w:.1f}%"></i>'
+                        f'<b>{pct_dot(cpu[1])}</b></td>'
+                        f'<td class="num">{pct_dot(cpu[2])}</td>')
+        else:
+            cpu_html = ('<td class="num gl muted">n/a</td>'
+                        '<td class="num muted">n/a</td><td class="num muted">n/a</td>')
+        rt = _numstats(s["rt"])
+        st = _numstats(s["st"])
+        rt_c = (f'<td class="num gl" data-sort="{int(round(rt[2]))}">{fmt_ns(rt[2])}</td>'
+                if rt else '<td class="num gl muted">n/a</td>')
+        st_c = (f'<td class="num gl" data-sort="{int(round(st[0]))}">{fmt_ns(st[0])}</td>'
+                if st else '<td class="num gl muted">n/a</td>')
+        body.append(
+            f'<tr><td class="name">{esc(el)}</td><td>{esc(emeta.get("type", "Task"))}</td>'
+            f'<td class="num">{esc(str(emeta["id"]))}</td>'
+            f'<td class="num">{esc(str(emeta["prio"]))}</td>'
+            f'<td class="num">{s["count"]}</td>'
+            f'{cpu_html}{tcells(_numstats(s["cet"]), True)}{tcells(_numstats(s["dt"]), True)}'
+            f'{rt_c}{st_c}</tr>')
+
+    def card(k, v):
+        return f'<div class="card"><div class="k">{esc(k)}</div><div class="v">{esc(v)}</div></div>'
+
+    cards = [card("System", sysname), card("Tasks / ISRs", str(len(order)))]
+    if frames:
+        cards.append(card("BSF event", (bsf_name or "?").split(":")[0]))
+        cards.append(card("BSF frames", f"{len(frames)}  ({avg_ms:.2f} ms)"))
+        if sysload:
+            cards.append(card("System CPU load [%]  min/avg/max",
+                              f"{pct_dot(min(sysload))} / {pct_dot(sum(sysload)/len(sysload))} "
+                              f"/ {pct_dot(max(sysload))}"))
+    def sth(label, col, cls="", rowspan=False, strtype=False):
+        rs = ' rowspan="2"' if rowspan else ''
+        dt = ' data-type="str"' if strtype else ''
+        c = ("sortable " + cls).strip()
+        return f'<th class="{c}" data-col="{col}"{rs}{dt}>{label}</th>'
+
+    grp = '<th class="grp gl" colspan="3">{}</th>'
+    row1 = (sth("Name", 0, rowspan=True, strtype=True)
+            + sth("Type", 1, rowspan=True, strtype=True)
+            + sth("ID", 2, "num", rowspan=True) + sth("Prio", 3, "num", rowspan=True)
+            + sth("Count", 4, "num", rowspan=True)
+            + grp.format("CPU Load&nbsp;%") + grp.format("CET") + grp.format("DT")
+            + sth("RT&nbsp;Max", 14, "num gl", rowspan=True)
+            + sth("ST&nbsp;Min", 15, "num gl", rowspan=True))
+    row2 = ""
+    for base in (5, 8, 11):                          # CPU / CET / DT sub-headers
+        row2 += (sth("Min", base, "num gl") + sth("Avg", base + 1, "num")
+                 + sth("Max", base + 2, "num"))
+    head = f'<thead><tr>{row1}</tr><tr>{row2}</tr></thead>'
+    comp = ("overhead-compensated" if compensated else "raw (no overhead compensation)")
+    minfo = []
+    if meta.get("source"):
+        minfo.append(("Source", meta["source"]))
+    if meta.get("project"):
+        minfo.append(("Project", meta["project"]))
+    if meta.get("bid"):
+        minfo.append(("Expected BID", meta["bid"]))
+    if meta.get("duration"):
+        minfo.append(("Duration", _fmt_dur(meta["duration"])))
+    if meta.get("captured"):
+        minfo.append(("Captured", meta["captured"]))
+    meta_html = ('<table class="meta">' + "".join(
+        f'<tr><td class="k">{esc(k)}</td><td class="v">{esc(v)}</td></tr>' for k, v in minfo)
+        + '</table>') if minfo else ""
+    doc = (
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>TickScope timing report - {esc(sysname)}</title><style>{_HTML_CSS}</style></head><body>"
+        f'<div class="wrap"><h1>TickScope timing report - {esc(sysname)}</h1>'
+        f'<div class="sub">Per task/ISR min / avg / max &middot; CET {comp} &middot; '
+        f'CPU load per BSF frame</div>'
+        f'{meta_html}'
+        f'<div class="cards">{"".join(cards)}</div>'
+        f'<div class="tablewrap"><table id="report">{head}<tbody>{"".join(body)}</tbody></table></div>'
+        '<footer>'
+        '<b>CET</b> Core Execution Time (on-CPU, preemption excluded) &middot; '
+        '<b>DT</b> Delta Time (period, activation&rarr;activation) &middot; '
+        '<b>RT</b> Response Time (activation&rarr;stop) &middot; '
+        '<b>ST</b> Slack Time (stop&rarr;next activation) &middot; '
+        '<b>CPU Load</b> per BSF frame <code>100&middot;CET/frame</code>, 0&nbsp;% in idle frames. '
+        'Rows sorted by priority (highest first); click any column header to re-sort.'
+        '</footer></div>' + _HTML_JS + '</body></html>')
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(doc)
+    return len(order)
+
+
