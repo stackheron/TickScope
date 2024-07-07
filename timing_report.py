@@ -578,3 +578,66 @@ def write_html(stats, intervals, elems, bsf_name, sysname, path, compensated=Tru
     return len(order)
 
 
+def report_from_interp_rows(rows, project_path, sid, sysname, out_path=None,
+                            compensate=True, html_path=None, source=None, captured=None):
+    """Entry used by stream_to_csv: build CSV and/or HTML report from interpret() rows."""
+    elems = parse_project_elements(project_path).get(sid, {})
+    tick = _tick_from_project(project_path, sid)
+    bsf = parse_bsf_task(project_path, sid)
+    events = events_from_interp_rows(rows)
+    stats, intervals = compute_stats(events, tick, compensate)
+    meta = _build_meta(source, project_path, events, captured, sid)
+    n = len(stats)
+    if out_path:
+        n = write_report(stats, intervals, elems, bsf, sysname, out_path, meta)
+    if html_path:
+        n = write_html(stats, intervals, elems, bsf, sysname, html_path, compensate, meta)
+    return n, len(stats)
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description="Per-element CET/DT/RT/ST + per-BSF-frame CPU-load report")
+    ap.add_argument("--interp", required=True, help="an InterpretedTraceData CSV")
+    ap.add_argument("--project", required=True, help="project file for id/priority + BSF + tick")
+    ap.add_argument("--sid", type=int, default=None,
+                    help="system id (default: read from the CSV 'System Id' column)")
+    ap.add_argument("--out", help="report CSV (default: <interp>_report.csv)")
+    ap.add_argument("--html", nargs="?", const="", default=None,
+                    help="also write a styled HTML report (default: <interp>_report.html)")
+    ap.add_argument("--source", default=None,
+                    help="source capture filename to record in the report (default: the --interp file)")
+    ap.add_argument("--captured", default=None,
+                    help="trace capture date/time to record (default: from the CSV Timestamp column)")
+    ap.add_argument("--raw-cet", action="store_true",
+                    help="report raw CET/CPU-load without trace-overhead compensation")
+    args = ap.parse_args()
+
+    events, csv_sid, sysname, csv_captured = events_from_interp_csv(args.interp)
+    if not events:
+        print(f"ERROR: no trace events in {args.interp}", file=sys.stderr)
+        return 2
+    sid = args.sid if args.sid is not None else csv_sid
+    systems = parse_project_elements(args.project)
+    if sid not in systems:
+        print(f"ERROR: SID {sid} not in the project file (have {sorted(systems)})", file=sys.stderr)
+        return 2
+    tick = _tick_from_project(args.project, sid)
+    bsf = parse_bsf_task(args.project, sid)
+    stats, intervals = compute_stats(events, tick, compensate=not args.raw_cet)
+    meta = _build_meta(args.source or args.interp, args.project, events, args.captured or csv_captured, sid)
+    sn = sysname or f"SID{sid}"
+    out = args.out or (args.interp.rsplit(".", 1)[0] + "_report.csv")
+    n = write_report(stats, intervals, systems[sid], bsf, sn, out, meta)
+    nf = len(bsf_frames(stats, bsf))
+    print(f"[report] {n} elements -> {out}  (system {sn}, tick {tick}ns, "
+          f"BSF={bsf or 'none'} {nf} frames, CET {'raw' if args.raw_cet else 'overhead-compensated'})")
+    if args.html is not None:
+        htmlp = args.html or (args.interp.rsplit(".", 1)[0] + "_report.html")
+        write_html(stats, intervals, systems[sid], bsf, sn, htmlp, not args.raw_cet, meta)
+        print(f"[report] {n} elements -> {htmlp}  (HTML)")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
