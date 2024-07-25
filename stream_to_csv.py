@@ -107,3 +107,65 @@ def iter_frames(data):
     return _iter_pcapng(data) if data[:4] == b"\x0a\x0d\x0d\x0a" else _iter_pcap(data)
 
 
+def _udp_payload(frame, linktype):
+    """Strip link/IPv4/UDP; return (src_ip, dst_ip, sport, dport, payload, payload_offset)
+    or None."""
+    if linktype == 1:            # Ethernet II
+        if len(frame) < 14:
+            return None
+        etype = struct.unpack_from(">H", frame, 12)[0]
+        p = 14
+        while etype in (0x8100, 0x88A8):   # VLAN tag(s)
+            if len(frame) < p + 4:
+                return None
+            etype = struct.unpack_from(">H", frame, p + 2)[0]
+            p += 4
+        if etype != 0x0800:
+            return None
+    elif linktype in (101, 12):  # RAW IP
+        p = 0
+    else:
+        return None
+    ip = frame[p:]
+    if len(ip) < 20 or (ip[0] >> 4) != 4:
+        return None
+    ihl = (ip[0] & 0x0F) * 4
+    if ip[9] != 17 or len(ip) < ihl + 8:      # not UDP
+        return None
+    src_ip = ".".join(str(b) for b in ip[12:16])
+    dst_ip = ".".join(str(b) for b in ip[16:20])
+    sport, dport, ulen = struct.unpack_from(">HHH", ip, ihl)
+    payload = ip[ihl + 8: ihl + max(ulen, 8)]
+    return src_ip, dst_ip, sport, dport, payload, p + ihl + 8
+
+
+def iter_udp(data):
+    """Yield (frame_no, payload_offset, src_ip, dst_ip, sport, dport, payload,
+    capture_epoch) for every UDP datagram; frame_no is 1-based over all packets and
+    payload_offset is absolute in `data` (so callers can patch the image in place)."""
+    for n, (foff, frame, lt, ts) in enumerate(iter_frames(data), 1):
+        u = _udp_payload(frame, lt)
+        if u is not None:
+            src_ip, dst_ip, sport, dport, payload, poff = u
+            yield n, foff + poff, src_ip, dst_ip, sport, dport, payload, ts
+
+
+def read_udp_payloads(path):
+    """Return [(src_ip, dst_ip, sport, dport, payload, capture_epoch)] for every UDP
+    datagram."""
+    data = open(path, "rb").read()
+    return [u[2:] for u in iter_udp(data)]
+
+
+def first_capture_epoch(path):
+    """Return the first packet's capture time as a Unix epoch (float, UTC), or None."""
+    try:
+        data = open(path, "rb").read()
+        return next((ts for _, _, _, ts in iter_frames(data) if ts is not None), None)
+    except Exception:
+        return None
+
+
+# --------------------------------------------------------------------------- #
+# Frame walk + trace-stream extraction
+# --------------------------------------------------------------------------- #
