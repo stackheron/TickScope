@@ -169,3 +169,68 @@ def first_capture_epoch(path):
 # --------------------------------------------------------------------------- #
 # Frame walk + trace-stream extraction
 # --------------------------------------------------------------------------- #
+def walk_frames(buf):
+    """Yield (tid, plugin, op, payload) for concatenated frames in a datagram."""
+    off = 0
+    while off + 2 <= len(buf):
+        b0, b1 = buf[off], buf[off + 1]
+        tid = (b0 & 0x7F) >> 2
+        op = (b1 >> 3) & 0x1F
+        plugin = b1 & 0x07
+        if b0 & 0x80:                                   # extended frame
+            if off + 4 > len(buf):
+                break
+            ln = struct.unpack_from("<H", buf, off + 2)[0]
+            if off + 4 + ln > len(buf):
+                break
+            yield tid, plugin, op, buf[off + 4: off + 4 + ln]
+            off += 4 + ln
+        else:                                           # standard 8-byte frame
+            yield tid, plugin, op, buf[off + 2: off + 8]
+            off += 8
+
+
+def extract_streams(payloads, flt=None):
+    """Return {tid: {'entries','gaps','frames','endpoint'}} from trace-stream frames.
+
+    flt (optional): {'src_ip','dst_ip','sport','dport'} -- any set key restricts which
+    UDP datagrams are accepted (None/absent = accept any). Lets a capture that holds
+    more than one ECU/stream be narrowed to one endpoint."""
+    flt = flt or {}
+    cores = {}
+    for src_ip, dst_ip, sport, dport, buf, ts in payloads:
+        if flt.get("src_ip") and src_ip != flt["src_ip"]:
+            continue
+        if flt.get("dst_ip") and dst_ip != flt["dst_ip"]:
+            continue
+        if flt.get("sport") is not None and sport != flt["sport"]:
+            continue
+        if flt.get("dport") is not None and dport != flt["dport"]:
+            continue
+        for tid, plugin, op, payload in walk_frames(buf):
+            if plugin != TRACE_PLUGIN or op != TRACE_STREAM_OP or len(payload) < 4:
+                continue
+            c = cores.setdefault(tid, {"entries": [], "gaps": 0, "frames": 0, "seq": None,
+                                       "ts": None, "gap_hints": {},
+                                       "endpoint": (src_ip, dst_ip, sport, dport)})
+            body = payload[4:]
+            n = len(body) // 4
+            seq = payload[0]
+            if c["seq"] is not None and (c["seq"] + 1) & 0xFF != seq:
+                c["gaps"] += 1
+                # dropped datagram(s): remember the capture-clock time between the last
+                # entry before the gap and the last entry of this frame, so the
+                # interpreter can recover 16-bit timestamp wraps lost in the gap
+                if n and ts is not None and c["ts"] is not None:
+                    start = len(c["entries"])
+                    c["gap_hints"][start] = (start + n - 1, (ts - c["ts"]) * 1e9)
+            c["seq"] = seq
+            c["ts"] = ts
+            c["frames"] += 1
+            c["entries"].extend(struct.unpack(f"<{n}I", body[:n * 4]))
+    for c in cores.values():
+        c.pop("seq", None)
+        c.pop("ts", None)
+    return cores
+
+
