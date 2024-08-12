@@ -234,3 +234,29 @@ def extract_streams(payloads, flt=None):
     return cores
 
 
+def parse_project_tid_map(path):
+    """Return {TargetId: sid} from the project file SystemCommunicationConfig."""
+    import re
+    xml = open(path, encoding="utf-8-sig").read()
+    spans = [m.start() for m in re.finditer(r"<System\b", xml)] + [len(xml)]
+    tid2sid = {}
+    for i in range(len(spans) - 1):
+        body = xml[spans[i]:spans[i + 1]]
+        sid = re.search(r'SID="(\d+)"', body)
+        tid = re.search(r"<TargetId>(\d+)</TargetId>", body)
+        if sid and tid:
+            tid2sid[int(tid.group(1))] = int(sid.group(1))
+    return tid2sid
+
+
+def write_raw_csv(entries, sid, path):
+    cols = ["Raw Index", "Raw Time", "Event Id (dec)", "Event Id (hex)",
+            "Trace Info (dec)", "Trace Info (hex)", "Raw Trace Entry", "System Id"]
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(";".join(cols) + "\n")
+        for i, e in enumerate(entries, 1):
+            ts, ev, info = (e >> 16) & 0xFFFF, (e >> 10) & 0x3F, e & 0x3FF
+            f.write(f"{i};{ts};{ev};0x{ev:02X};{info};0x{info:03X};0x{e:08X};{sid}\n")
+
+
+# --------------------------------------------------------------------------- #
