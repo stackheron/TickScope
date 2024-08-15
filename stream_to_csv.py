@@ -260,3 +260,165 @@ def write_raw_csv(entries, sid, path):
 
 
 # --------------------------------------------------------------------------- #
+def main():
+    ap = argparse.ArgumentParser(
+        description="Convert an unattended trace stream (.pcapng/.pcap) to "
+                    "InterpretedTraceData.csv")
+    ap.add_argument("--pcap", required=True, help="capture file (.pcapng or .pcap)")
+    ap.add_argument("--project", required=True, help="project file for names + timing")
+    ap.add_argument("--sid", type=int, default=None,
+                    help="system id to interpret (default: the core with most entries)")
+    ap.add_argument("--src-ip", default=None,
+                    help="only accept UDP datagrams from this source IP (the ECU, project <IpAddress>)")
+    ap.add_argument("--dst-ip", default=None,
+                    help="only accept UDP datagrams to this destination IP "
+                         "(e.g. the 255.255.255.255 broadcast)")
+    ap.add_argument("--sport", type=int, default=None,
+                    help="only accept UDP datagrams from this source port (ECU <EcuPort>)")
+    ap.add_argument("--dport", type=int, default=None,
+                    help="only accept UDP datagrams to this port (PC <PcPort>)")
+    ap.add_argument("--out", help="InterpretedTraceData CSV (default: <pcap>_InterpretedTraceData.csv)")
+    ap.add_argument("--raw-out", nargs="?", const="", default=None,
+                    help="also write a RawTraceData CSV (default name if no value given)")
+    ap.add_argument("--bin-out", nargs="?", const="", default=None,
+                    help="also write the raw uint32 LE trace block (.bin)")
+    ap.add_argument("--report", nargs="?", const="", default=None,
+                    help="also write a per-task CET/DT/RT/ST + CPU-load report CSV "
+                         "(default name if no value given)")
+    ap.add_argument("--html", nargs="?", const="", default=None,
+                    help="also write the timing report as styled HTML "
+                         "(default name if no value given)")
+    ap.add_argument("--raw-cet", action="store_true",
+                    help="with --report/--html: raw CET without trace-overhead compensation")
+    ap.add_argument("--list-cores", action="store_true",
+                    help="list the SIDs found in the capture (one 'sid tid entries name' "
+                         "line each) and exit")
+    args = ap.parse_args()
+
+    payloads = read_udp_payloads(args.pcap)
+    if not payloads:
+        print(f"ERROR: no UDP datagrams in {args.pcap}", file=sys.stderr)
+        return 2
+    flt = {"src_ip": args.src_ip, "dst_ip": args.dst_ip,
+           "sport": args.sport, "dport": args.dport}
+    cores = extract_streams(payloads, flt)
+    if not cores:
+        active = ", ".join(f"{k}={v}" for k, v in flt.items() if v is not None)
+        print(f"ERROR: no trace stream frames (plugin 1, op 18) found"
+              + (f" matching filter [{active}]" if active else ""), file=sys.stderr)
+        return 2
+
+    systems = ti.parse_project(args.project)
+    tid2sid = parse_project_tid_map(args.project)
+
+    # map captured cores (by frame TargetId) to SIDs; pick which to interpret
+    found = []
+    for tid, c in cores.items():
+        sid = tid2sid.get(tid, tid)
+        found.append((sid, tid, c))
+    found.sort(key=lambda x: -len(x[2]["entries"]))
+    print(f"[stream] {len(payloads)} UDP datagrams; cores found:")
+    for sid, tid, c in found:
+        nm = systems.get(sid, {}).get("name", f"SID{sid}")
+        sip, dip, sp, dp = c["endpoint"]
+        print(f"    tid {tid} -> SID {sid} ({nm}): {len(c['entries'])} entries, "
+              f"{c['frames']} frames, {c['gaps']} seq-gaps  [{sip}:{sp} -> {dip}:{dp}]")
+
+    if args.list_cores:
+        for sid, tid, c in found:
+            print(f"{sid} {tid} {len(c['entries'])} "
+                  f"{systems.get(sid, {}).get('name', f'SID{sid}')}")
+        return 0
+
+    if args.sid is not None:
+        sel = next((x for x in found if x[0] == args.sid), None)
+        if sel is None:
+            print(f"ERROR: SID {args.sid} not in capture (have {[x[0] for x in found]})",
+                  file=sys.stderr)
+            return 2
+    else:
+        sel = found[0]
+    sid, tid, c = sel
+    entries, gaps = c["entries"], c["gaps"]
+    if not entries:
+        print(f"ERROR: SID {sid} has no trace entries in the capture", file=sys.stderr)
+        return 2
+    if sid not in systems:
+        print(f"ERROR: SID {sid} not in the project file (have {sorted(systems)})", file=sys.stderr)
+        return 2
+    if gaps:
+        print(f"WARNING: {gaps} dropped-datagram gap(s) in the stream -> the trace has "
+              f"missing spans (a UDP broadcast is lossy); time across each gap is "
+              f"re-anchored from the capture clock.", file=sys.stderr)
+
+    sysinfo = systems[sid]
+    sysinfo["sid"] = sid
+
+    stem = os.path.splitext(args.pcap)[0]
+
+    # A POSIX/QNX target uses a wider clock (MaxAbsTime=0xFFFFFF) and a completely
+    # different 64-bit trace format (see posix_report.py). The MCU InterpretedTraceData
+    # decode below does not apply; delegate the per-CPU/thread CPU-load report to
+    # posix_report instead (byte-exact InterpretedTraceData for POSIX is not reproduced).
+    if sysinfo["wrap"] > 0x10000:
+        import posix_report as tp
+        if args.report is None and args.html is None:
+            print(f"ERROR: SID {sid} ({sysinfo['name']}) is a POSIX/QNX system; this tool "
+                  f"reproduces its CPU-load report but not the InterpretedTraceData. "
+                  f"Re-run with --report and/or --html.", file=sys.stderr)
+            return 2
+        repp = (args.report or f"{stem}_posix_report.csv") if args.report is not None else None
+        htmlp = (args.html or f"{stem}_posix_report.html") if args.html is not None else None
+        epoch = first_capture_epoch(args.pcap)
+        captured = (datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
+                    .strftime("%Y-%m-%d %H:%M:%S UTC")) if epoch else None
+        meta = {"Source": os.path.basename(args.pcap), "Project": os.path.basename(args.project)}
+        if captured:
+            meta["Captured"] = captured
+        cpu_stats, proc_rows, nf, mode = tp.report(payloads, args.project, sid, repp, meta,
+                                                   html_path=htmlp, flt=flt)
+        outs = " + ".join(p for p in (repp, htmlp) if p)
+        lbl = "synthetic windows" if mode == "synthetic" else "BSF frames"
+        print(f"[posix] {nf} {lbl}, {len(proc_rows)} processes -> {outs}")
+        for c in sorted(cpu_stats):
+            mn, av, mx, n = cpu_stats[c]
+            print(f"    CPU{c}: min {mn:.2f}  avg {av:.2f}  max {mx:.2f}")
+        return 0
+    out = args.out or f"{stem}_InterpretedTraceData.csv"
+
+    # stream is already chronological: no ring/discontinuity reorder (start_pos=0)
+    rows = ti.interpret(entries, sysinfo, buf_base=None, start_pos=0,
+                        gap_hints=c["gap_hints"])
+    with open(out, "w", encoding="utf-8-sig", newline="") as f:
+        f.write(";".join(ti.COLS) + "\n")
+        for r in rows:
+            f.write(";".join(str(r[cn]) for cn in ti.COLS) + "\n")
+    print(f"[stream] {len(rows)} rows -> {out}  (system {sysinfo['name']}, "
+          f"tick {sysinfo['tick']}ns, {len(entries)} raw entries)")
+
+    if args.raw_out is not None:
+        rawp = args.raw_out or f"{stem}_RawTraceData.csv"
+        write_raw_csv(entries, sid, rawp)
+        print(f"[stream] {len(entries)} raw entries -> {rawp}")
+    if args.bin_out is not None:
+        binp = args.bin_out or f"{stem}.bin"
+        with open(binp, "wb") as f:
+            f.write(struct.pack(f"<{len(entries)}I", *entries))
+        print(f"[stream] raw block -> {binp}")
+    if args.report is not None or args.html is not None:
+        repp = (args.report or f"{stem}_report.csv") if args.report is not None else None
+        htmlp = (args.html or f"{stem}_report.html") if args.html is not None else None
+        epoch = first_capture_epoch(args.pcap)
+        captured = (datetime.datetime.fromtimestamp(epoch, datetime.timezone.utc)
+                    .strftime("%Y-%m-%d %H:%M:%S UTC")) if epoch else None
+        n, _ = tr.report_from_interp_rows(rows, args.project, sid, sysinfo["name"], repp,
+                                          compensate=not args.raw_cet, html_path=htmlp,
+                                          source=args.pcap, captured=captured)
+        outs = " + ".join(p for p in (repp, htmlp) if p)
+        print(f"[stream] {n} elements -> {outs}  (CET/DT/RT/ST + BSF CPU load, "
+              f"CET {'raw' if args.raw_cet else 'overhead-compensated'})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
