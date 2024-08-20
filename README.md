@@ -65,3 +65,53 @@ identical except the wall-clock `Timestamp` the host adds on sync-data events.
 A POSIX/QNX system in the project file is detected automatically and handed to
 `posix_report.py` (use `--report` and/or `--html`).
 
+## Trace entry format (MCU targets)
+
+```
+entry = (rawTime << 16) | (eventId << 10) | traceInfo
+    bits[31:16] rawTime   16-bit rolling timestamp, unit = TickDuration (project)
+    bits[15:10] eventId   1 START, 2 STOP, 12 ACTIVATION, 13 WAIT, 14 RESUME,
+                          15 DISCONTINUITY, 18 SYNCDATA_START, 20/21 sync carriers, 24 TRIGGER
+    bits[9:0]   traceInfo element id (Task/ISR) for scheduling events; control payload otherwise
+```
+
+Absolute time = unwrapped rawTime * TickDuration. Element names come from the project file
+`<SystemElement ID=.. Name=.. Type="Task">` table. A raw `.bin` block read out of the
+ring buffer is rotated so the DISCONTINUITY marker (write pointer) is last, which
+gives chronological order (`--no-reorder` disables this).
+
+## Timing report (`timing_report.py`)
+
+Per task/ISR **min/avg/max of CET, DT, RT, ST** plus per-BSF-frame CPU load, using the
+project file for element id/priority, tick and BSF event:
+
+```sh
+python3 timing_report.py --interp trace_InterpretedTraceData.csv --project PROJ.xml
+python3 timing_report.py --interp trace_InterpretedTraceData.csv --project PROJ.xml --html
+#   --raw-cet   report CET without trace-overhead compensation
+#   --source / --captured  override the provenance shown in the report
+```
+
+| metric | name | definition |
+|--------|------|------------|
+| **CET** | Core Execution Time | on-CPU time per job (preemption/wait gaps excluded) |
+| **DT**  | Delta Time | interval between consecutive Activations (observed period) |
+| **RT**  | Response Time | `Stop - Activation` (release to termination) |
+| **ST**  | Slack Time | `Activation(next) - Stop` (the gap; `= period - RT`) |
+| **CPU Load [%]** | per-BSF-frame CPU load | `100 * (task CET in frame) / frame duration` |
+
+One job = `Activation -> Start -> [Wait -> Resume]* -> Stop`; min/avg/max are over
+the per-job population.
+
+- **CET** includes trace-overhead compensation `TickDuration * (2 + 4*nwait)` per
+  job (validated against a host System report: min/max exact for most tasks, avg
+  within 1 us). `--raw-cet` gives the uncompensated value.
+- **CPU load** is per **BSF frame** (interval between consecutive activations of the
+  `<BasicSchedulingFrameEvent SystemElementID=..>` task from the project file). Execution
+  straddling a frame boundary is split by time; frames where a task does not run count
+  as 0 %. The system-level min/avg/max is in the report header.
+- The **CSV** uses a decimal comma for percentages (host-report style); the **HTML**
+  uses a dot. The HTML is self-contained (light/dark theme, click a column header to
+  sort).
+- Both carry provenance: source file, project file, build id, trace duration, capture time.
+
