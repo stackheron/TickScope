@@ -93,3 +93,43 @@ def parse_project_posix(path):
 # --------------------------------------------------------------------------- #
 # stream extraction: 64-bit entries per datagram, with dropped-datagram markers
 # --------------------------------------------------------------------------- #
+def extract_posix(payloads, want_tid, flt=None):
+    """Return (entries, endpoint) for the POSIX core. entries is a flat list of
+    (time24, ev8, ti32); a (0, GAP, 0) sentinel marks a per-core seq discontinuity."""
+    import stream_to_csv as tss
+    flt = flt or {}
+    entries, endpoint, seqprev = [], None, None
+    for src, dst, sport, dport, buf, _ in payloads:
+        if flt.get("src_ip") and src != flt["src_ip"]:
+            continue
+        if flt.get("dst_ip") and dst != flt["dst_ip"]:
+            continue
+        if flt.get("sport") is not None and sport != flt["sport"]:
+            continue
+        if flt.get("dport") is not None and dport != flt["dport"]:
+            continue
+        for tid, plugin, op, payload in tss.walk_frames(buf):
+            if plugin != TRACE_PLUGIN or op != TRACE_STREAM_OP or len(payload) < 4:
+                continue
+            if tid != want_tid:
+                continue
+            if endpoint is None:
+                endpoint = (src, dst, sport, dport)
+            seq = payload[0]
+            if seqprev is not None and (seqprev + 1) & 0xFF != seq:
+                entries.append((0, GAP, 0))
+            seqprev = seq
+            body = payload[4:]
+            n = len(body) // 8
+            if n == 0:
+                continue
+            words = struct.unpack(f"<{2 * n}I", body[:8 * n])
+            for e in range(n):
+                lo, hi = words[2 * e], words[2 * e + 1]
+                entries.append(((hi >> 8) & MASK24, hi & 0xFF, lo))
+    return entries, endpoint
+
+
+# --------------------------------------------------------------------------- #
+# fold TASK_IDS / TASK_NAME -> App-Defined-Id registry
+# --------------------------------------------------------------------------- #
