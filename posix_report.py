@@ -133,3 +133,65 @@ def extract_posix(payloads, want_tid, flt=None):
 # --------------------------------------------------------------------------- #
 # fold TASK_IDS / TASK_NAME -> App-Defined-Id registry
 # --------------------------------------------------------------------------- #
+def build_registry(entries):
+    """Return {appid: {'pid','tid','main','name'}} from TASK_IDS(31)/TASK_NAME(30)."""
+    N = len(entries)
+    reg = {}
+
+    def carriers(k):
+        c, j = [], k + 1
+        while j < N and entries[j][1] in CARRIER:
+            c.append(entries[j])
+            j += 1
+        return c, j
+
+    k = 0
+    while k < N:
+        _, ev, _ = entries[k]
+        if ev == EV_TASK_IDS:
+            c, k = carriers(k)
+            if len(c) >= 2:
+                appid = c[0][0]
+                pid = c[0][2] >> 8
+                tid = c[1][0] >> 8
+                main = bool((c[1][2] >> 16) & 1)
+                d = reg.setdefault(appid, {})
+                d.update(pid=pid, tid=tid, main=main)
+            continue
+        if ev == EV_TASK_NAME:
+            c, k = carriers(k)
+            if c:
+                appid = c[0][0]                 # first carrier hi[1:4] = appid
+                name = _name_from_carriers(c)
+                if name:
+                    reg.setdefault(appid, {})["name"] = name
+            continue
+        k += 1
+    return reg
+
+
+def _name_from_carriers(c):
+    """Reconstruct a TASK_NAME string (byte order validated on QNX):
+      - first carrier (ev20): name bytes = lo[1:4] (lo[0] is a 0 marker; hi = appid)
+      - each full ev20 carrier: name bytes = hi[1:4] then lo[0:4]  (7 bytes)
+      - the ev21 terminator: trailing name bytes = lo[0:4] only (hi is a timestamp)
+    NUL-terminated."""
+    def lo_bytes(e):
+        return struct.pack("<I", e[2])                # 4 bytes of the lo word
+    def hi_bytes(e):
+        return struct.pack("<I", (e[0] << 8) | e[1])  # rebuild hi = (time24<<8)|ev
+
+    nb = bytearray(lo_bytes(c[0])[1:4])
+    for cc in c[1:]:
+        if cc[1] == 20:                               # full data carrier
+            nb += hi_bytes(cc)[1:4]
+            nb += lo_bytes(cc)[0:4]
+        else:                                         # ev21 terminator: lo tail only
+            nb += lo_bytes(cc)[0:4]
+            break
+    return nb.split(b"\x00")[0].decode("latin1", "replace").strip()
+
+
+# --------------------------------------------------------------------------- #
+# scheduling model (Model C) -> per-CPU / per-thread busy intervals + BSF frames
+# --------------------------------------------------------------------------- #
