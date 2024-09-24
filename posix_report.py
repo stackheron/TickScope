@@ -195,3 +195,60 @@ def _name_from_carriers(c):
 # --------------------------------------------------------------------------- #
 # scheduling model (Model C) -> per-CPU / per-thread busy intervals + BSF frames
 # --------------------------------------------------------------------------- #
+def build_intervals(entries, reg, tick):
+    """Walk the trace once. Return acts, cpu_runs, thr_runs, gaps, (t_first,t_last).
+      acts     : {appid: [activation absolute-ns...]} from AP_GEN_ACTIVATE (BSF source)
+      cpu_runs : (start,end,cpu,appid) for PER-CPU load -- a preempted thread keeps the
+                 CPU busy until the replacing SWITCH (Model C: PREEMPT does not idle it)
+      thr_runs : (start,end,cpu,appid) for PER-THREAD CET -- PREEMPT ends the thread's
+                 run (the preempt->switch scheduling-latency gap is credited to no thread)
+    Absolute ns uses modular 24-bit deltas; at a GAP/DISCONTINUITY (lossy-UDP boundary)
+    in-flight runs are dropped and the spanning frame excluded (time is not comparable)."""
+    acts, cpu_runs, thr_runs, gaps = {}, [], [], []
+    cur = {}          # cpu -> [start_ns, appid, thr_open]  (thr_open False after PREEMPT)
+    now = None
+    lastraw = None
+    t_first = t_last = None
+    for t, ev, ti in entries:
+        if ev == GAP or ev == 15:
+            cur = {}
+            if now is not None:
+                gaps.append(now)
+            continue
+        if ev in CARRIER:
+            continue
+        if now is None:
+            now = t_first = 0
+        else:
+            now += ((t - lastraw) & MASK24) * tick   # ticks -> ns (modular, wrap-safe)
+        lastraw = t
+        t_last = now
+
+        if ev == EV_ACTIVATE:
+            acts.setdefault(ti & MASK24, []).append(now)
+            continue
+        if ev in (EV_SWITCH, EV_WAIT, EV_PREEMPT):
+            cpu = (ti >> 24) & 0xFF
+            app = ti & MASK24
+            if cpu > 63:
+                continue
+            c = cur.get(cpu)
+            if ev == EV_SWITCH:
+                if c is not None:               # close previous owner
+                    cpu_runs.append((c[0], now, cpu, c[1]))
+                    if c[2]:
+                        thr_runs.append((c[0], now, cpu, c[1]))
+                cur[cpu] = [now, app, True]
+            elif ev == EV_WAIT:                 # owner blocks; CPU idle until next SWITCH
+                if c is not None:
+                    cpu_runs.append((c[0], now, cpu, c[1]))
+                    if c[2]:
+                        thr_runs.append((c[0], now, cpu, c[1]))
+                    del cur[cpu]
+            elif ev == EV_PREEMPT:              # thread stops, CPU stays owned till SWITCH
+                if c is not None and c[2]:
+                    thr_runs.append((c[0], now, cpu, c[1]))
+                    c[2] = False
+    return acts, cpu_runs, thr_runs, sorted(gaps), (t_first, t_last)
+
+
