@@ -252,3 +252,42 @@ def build_intervals(entries, reg, tick):
     return acts, cpu_runs, thr_runs, sorted(gaps), (t_first, t_last)
 
 
+def _frame_loads(runs, frames, keyfn):
+    """Per-frame busy fraction (%) per key. keyfn(cpu, appid) -> hashable key (or None
+    to skip). Returns {key: [load_per_frame...]} covering every frame (0 where idle)."""
+    nf = len(frames) - 1
+    if nf <= 0:
+        return {}, nf
+    fdur = [frames[i + 1] - frames[i] for i in range(nf)]
+    busy = {}                                   # key -> [ns per frame]
+    for s, e, cpu, app in runs:
+        if e <= s:
+            continue
+        key = keyfn(cpu, app)
+        if key is None:
+            continue
+        arr = busy.get(key)
+        if arr is None:
+            arr = busy[key] = [0.0] * nf
+        i = bisect.bisect_right(frames, s) - 1
+        while 0 <= i < nf and frames[i] < e:
+            lo = s if s > frames[i] else frames[i]
+            hi = e if e < frames[i + 1] else frames[i + 1]
+            if hi > lo:
+                arr[i] += hi - lo
+            i += 1
+    loads = {k: [100.0 * arr[i] / fdur[i] if fdur[i] else 0.0 for i in range(nf)]
+             for k, arr in busy.items()}
+    return loads, nf
+
+
+def _stats(vals):
+    n = len(vals)
+    if n == 0:
+        return 0.0, 0.0, 0.0, 0
+    return min(vals), sum(vals) / n, max(vals), n
+
+
+# --------------------------------------------------------------------------- #
+# report orchestration
+# --------------------------------------------------------------------------- #
