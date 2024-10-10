@@ -291,3 +291,92 @@ def _stats(vals):
 # --------------------------------------------------------------------------- #
 # report orchestration
 # --------------------------------------------------------------------------- #
+def compute_report(entries, sysinfo, reg, bsf_appid=None, frame_ms=20.0):
+    """Return (cpu_stats, proc_rows, nframes, mode). cpu_stats: {cpu:(min,avg,max,n)}.
+    proc_rows: per-process rows with threads + per-CPU breakdown (empty if no config).
+    mode: 'bsf' (framed by the reference thread), 'appid' (by --bsf-appid), or
+    'synthetic' (config-less capture -> fixed-width windows; avg is meaningful, min/max
+    reflect the window grid; per-process/thread unavailable without TASK_IDS/TASK_NAME)."""
+    acts, cpu_runs, thr_runs, gaps, (t_start, t_end) = build_intervals(entries, reg, sysinfo["tick"])
+
+    # choose BSF frame boundaries
+    bsf_name = sysinfo.get("bsf_thread")
+    bsf_appids = {a for a, d in reg.items() if d.get("name") == bsf_name}
+    if bsf_appid is not None and bsf_appid in acts:
+        frames, mode = sorted(acts[bsf_appid]), "appid"
+    elif bsf_appids:
+        frames, mode = sorted(t for a in bsf_appids for t in acts.get(a, [])), "bsf"
+    elif t_start is not None and t_end > t_start:
+        # config-less capture: no named BSF thread -> uniform synthetic windows
+        w = max(int(frame_ms * 1e6), 1)
+        frames = list(range(int(t_start), int(t_end) + w, w))
+        mode = "synthetic"
+    else:
+        frames = []
+        mode = "synthetic"
+
+    # exclude BSF frames that span a lossy gap / discontinuity (the host does too --
+    # its report warns "system contains discontinuity"); such frames have missing
+    # spans that would otherwise read as artificial 0% (min) or >100% (max) spikes.
+    nf = max(len(frames) - 1, 0)
+    valid = [True] * nf
+    for g in gaps:
+        i = bisect.bisect_right(frames, g) - 1
+        # the gap frame AND the next frame are distorted: at a lossy boundary the
+        # modular time reconstruction can't recover the elapsed span, so the frame
+        # holding the gap (missing spans) and the one after it (skewed duration/base)
+        # are both dropped -- matching how the host flags discontinuity frames.
+        for j in (i, i + 1):
+            if 0 <= j < nf:
+                valid[j] = False
+
+    def st(vals):
+        return _stats([v for v, ok in zip(vals, valid) if ok])
+
+    cpus = sysinfo["cpus"]
+    ncpu = len(cpus) or 1
+    cpu_loads, _ = _frame_loads(cpu_runs, frames, lambda cpu, app: cpu if cpu in cpus else None)
+    cpu_stats = {c: st(cpu_loads.get(c, [0.0] * nf)) for c in cpus}
+
+    # per (pid,tid): total load + per-CPU breakdown (thread CET: PREEMPT ends the run)
+    thr_tot, _ = _frame_loads(thr_runs, frames,
+                              lambda cpu, app: (reg.get(app, {}).get("pid"),
+                                                reg.get(app, {}).get("tid")))
+    thr_cpu, _ = _frame_loads(thr_runs, frames,
+                              lambda cpu, app: ((reg.get(app, {}).get("pid"),
+                                                 reg.get(app, {}).get("tid"), cpu)
+                                                if cpu in cpus else None))
+    # group threads under processes
+    procs = {}
+    for (pid, tid), vals in thr_tot.items():
+        if pid is None:
+            continue
+        # process name = its main thread's name (QNX names the main thread after the
+        # process image), falling back to any named thread of the process
+        name = next((d.get("name") for a, d in reg.items()
+                     if d.get("pid") == pid and d.get("main") and d.get("name")), None) \
+            or next((d.get("name") for a, d in reg.items()
+                     if d.get("pid") == pid and d.get("name")), None)
+        p = procs.setdefault(pid, {"pid": pid, "name": name or "?", "threads": [],
+                                   "frames": [0.0] * nf})
+        # total "BSF CPU Load" is normalised by total multi-core capacity (/ ncpu);
+        # per-CPU columns stay relative to a single CPU.
+        tvals = [v / ncpu for v in vals]
+        for i in range(nf):
+            p["frames"][i] += tvals[i]
+        tname = next((d.get("name") for a, d in reg.items()
+                      if d.get("pid") == pid and d.get("tid") == tid and d.get("name")),
+                     None)
+        percpu = {c: st(thr_cpu.get((pid, tid, c), [0.0] * nf)) for c in cpus}
+        p["threads"].append({"tid": tid, "name": tname or "", "stats": st(tvals),
+                             "percpu": percpu})
+
+    proc_rows = []
+    for pid, p in procs.items():
+        p["stats"] = st(p["frames"])
+        p["threads"].sort(key=lambda t: -t["stats"][1])
+        proc_rows.append(p)
+    proc_rows.sort(key=lambda p: -p["stats"][1])
+    return cpu_stats, proc_rows, sum(valid), mode
+
+
