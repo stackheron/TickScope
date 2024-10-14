@@ -380,3 +380,91 @@ def compute_report(entries, sysinfo, reg, bsf_appid=None, frame_ms=20.0):
     return cpu_stats, proc_rows, sum(valid), mode
 
 
+def _fpct(x):
+    return f"{x:.4f}".rstrip("0").rstrip(".") if x else "0"
+
+
+def write_csv(cpu_stats, proc_rows, sysinfo, nf, meta, path):
+    L = []
+    L.append(f"System;{sysinfo['name']}")
+    for k, v in meta.items():
+        L.append(f"{k};{v}")
+    L.append(f"BSF frames;{nf}")
+    L.append("")
+    L.append("CPUs;BSF CPU Load [Min] [%];BSF CPU Load [Max] [%];BSF CPU Load [Avg] [%];Sample Count")
+    for c in sorted(cpu_stats):
+        mn, av, mx, n = cpu_stats[c]
+        L.append(f"CPU: {c};{_fpct(mn)};{_fpct(mx)};{_fpct(av)};{n}")
+    L.append("")
+    cpus = sorted(cpu_stats)
+    hdr = ["Processes / Threads", "BSF CPU Load [Min] [%]", "BSF CPU Load [Max] [%]",
+           "BSF CPU Load [Avg] [%]", "Sample Count"]
+    for c in cpus:
+        hdr += [f"CPU{c} [Min] [%]", f"CPU{c} [Max] [%]", f"CPU{c} [Avg] [%]"]
+    L.append(";".join(hdr))
+    for p in proc_rows:
+        mn, av, mx, n = p["stats"]
+        L.append(f"{p['name']} PID: {p['pid']};{_fpct(mn)};{_fpct(mx)};{_fpct(av)};{n}"
+                 + ";" * (3 * len(cpus)))
+        for t in p["threads"]:
+            mn, av, mx, n = t["stats"]
+            row = [f"    {p['name']} PID: {p['pid']} TID: {t['tid']}",
+                   _fpct(mn), _fpct(mx), _fpct(av), str(n)]
+            for c in cpus:
+                cmn, cav, cmx, _ = t["percpu"][c]
+                row += [_fpct(cmn), _fpct(cmx), _fpct(cav)]
+            L.append(";".join(row))
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        f.write("\n".join(L) + "\n")
+
+
+_CSS = r"""
+<style>
+:root{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#e2e2e2;--head:#f4f5f7;--bar:#4c8bf5;--proc:#eef2f9}
+@media (prefers-color-scheme:dark){:root{--bg:#16181d;--fg:#e6e6e6;--mut:#9aa0aa;--line:#2c2f36;--head:#20232a;--bar:#5b8def;--proc:#1c2027}}
+:root[data-theme=dark]{--bg:#16181d;--fg:#e6e6e6;--mut:#9aa0aa;--line:#2c2f36;--head:#20232a;--bar:#5b8def;--proc:#1c2027}
+:root[data-theme=light]{--bg:#fff;--fg:#1a1a1a;--mut:#666;--line:#e2e2e2;--head:#f4f5f7;--bar:#4c8bf5;--proc:#eef2f9}
+body{background:var(--bg);color:var(--fg);font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;margin:0;padding:24px}
+h1{font-size:19px;margin:0 0 4px}h2{font-size:15px;margin:26px 0 8px}
+.meta{border-collapse:collapse;margin:8px 0 4px;font-size:12.5px;color:var(--mut)}
+.meta td{padding:2px 14px 2px 0}
+.wrap{overflow-x:auto}
+table.t{border-collapse:collapse;width:100%;font-size:13px}
+table.t th,table.t td{padding:4px 8px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}
+table.t th:first-child,table.t td:first-child{text-align:left}
+table.t thead th{position:sticky;top:0;background:var(--head);cursor:pointer;user-select:none}
+tr.proc{background:var(--proc);font-weight:600}
+tr.thr td:first-child{padding-left:26px;color:var(--mut);font-weight:400}
+.bar{display:inline-block;height:9px;background:var(--bar);border-radius:2px;vertical-align:middle;margin-left:6px}
+.note{color:var(--mut);font-size:12px;margin-top:18px}
+</style>
+"""
+
+_JS = r"""
+<script>
+document.querySelectorAll('table.t').forEach(function(t){
+  var tb=t.tBodies[0]; if(!tb) return;
+  t.querySelectorAll('thead th').forEach(function(th,ci){
+    var dir=1;
+    th.addEventListener('click',function(){
+      dir=-dir;
+      var rows=Array.prototype.slice.call(tb.querySelectorAll('tr'));
+      rows.sort(function(a,b){
+        var x=a.children[ci], y=b.children[ci];
+        var xv=x.dataset.sort!==undefined?parseFloat(x.dataset.sort):x.textContent.trim().toLowerCase();
+        var yv=y.dataset.sort!==undefined?parseFloat(y.dataset.sort):y.textContent.trim().toLowerCase();
+        if(typeof xv==='number'&&isNaN(xv))xv=-Infinity; if(typeof yv==='number'&&isNaN(yv))yv=-Infinity;
+        return (xv<yv?-1:xv>yv?1:0)*dir;
+      });
+      rows.forEach(function(r){tb.appendChild(r);});
+    });
+  });
+});
+</script>
+"""
+
+
+def _cell(v):
+    return f'<td data-sort="{v:.6f}">{_fpct(v)}</td>'
+
+
