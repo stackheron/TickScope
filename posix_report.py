@@ -468,3 +468,51 @@ def _cell(v):
     return f'<td data-sort="{v:.6f}">{_fpct(v)}</td>'
 
 
+def write_html(cpu_stats, proc_rows, sysinfo, nf, meta, path):
+    esc = html.escape
+    cpus = sorted(cpu_stats)
+    H = ["<title>TickScope POSIX CPU load - " + esc(sysinfo["name"]) + "</title>", _CSS,
+         f"<h1>TickScope POSIX CPU load - {esc(sysinfo['name'])}</h1>",
+         "<table class=meta>"]
+    for k, v in meta.items():
+        H.append(f"<tr><td>{esc(str(k))}</td><td>{esc(str(v))}</td></tr>")
+    H.append(f"<tr><td>BSF frames</td><td>{nf}</td></tr></table>")
+
+    # CPUs table
+    H.append("<h2>CPUs</h2><div class=wrap><table class=t><thead><tr>"
+             "<th>CPU</th><th>Min %</th><th>Avg %</th><th>Max %</th><th>Frames</th>"
+             "</tr></thead><tbody>")
+    for c in cpus:
+        mn, av, mx, n = cpu_stats[c]
+        bar = f'<span class="bar" style="width:{min(av,100)*1.2:.0f}px"></span>'
+        H.append(f"<tr><td>CPU {c}</td>{_cell(mn)}<td data-sort='{av:.6f}'>{_fpct(av)}{bar}</td>"
+                 f"{_cell(mx)}<td data-sort='{n}'>{n}</td></tr>")
+    H.append("</tbody></table></div>")
+
+    # Processes / Threads
+    hdr = "<th>Process / Thread</th><th>Min %</th><th>Avg %</th><th>Max %</th>"
+    for c in cpus:
+        hdr += f"<th>C{c} avg %</th>"
+    H.append("<h2>Processes / Threads</h2><div class=wrap><table class=t><thead><tr>"
+             + hdr + "</tr></thead><tbody>")
+    for p in proc_rows:
+        mn, av, mx, n = p["stats"]
+        H.append(f"<tr class=proc><td>{esc(p['name'])} PID {p['pid']}</td>{_cell(mn)}{_cell(av)}{_cell(mx)}"
+                 + "<td></td>" * len(cpus) + "</tr>")
+        for t in p["threads"]:
+            mn, av, mx, n = t["stats"]
+            row = f"<tr class=thr><td>TID {t['tid']}{(' '+esc(t['name'])) if t['name'] else ''}</td>" \
+                  f"{_cell(mn)}{_cell(av)}{_cell(mx)}"
+            for c in cpus:
+                _, cav, _, _ = t["percpu"][c]
+                row += _cell(cav)
+            H.append(row + "</tr>")
+    H.append("</tbody></table></div>")
+    H.append('<p class=note>Per-CPU load = single-core busy fraction; process/thread '
+             '"BSF CPU Load" is normalised by total core count. Overhead-uncompensated: '
+             'the busiest cores read ~1-3 pp below the reference host tool.</p>')
+    H.append(_JS)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(H))
+
+
