@@ -516,3 +516,79 @@ def write_html(cpu_stats, proc_rows, sysinfo, nf, meta, path):
         f.write("\n".join(H))
 
 
+def report(payloads, project, sid=None, csv_path=None, meta=None, html_path=None,
+           bsf_appid=None, frame_ms=20.0, flt=None):
+    """High-level: extract POSIX core, compute, write CSV/HTML.
+    flt: optional endpoint filter {'src_ip','dst_ip','sport','dport'} (see extract_posix).
+    Returns (cpu_stats, proc_rows, nf, mode). See compute_report for `mode`."""
+    sysinfo, tid2sid = parse_project_posix(project)
+    if sysinfo is None:
+        raise SystemExit("no POSIX system found in the project file")
+    want_sid = sid if sid is not None else sysinfo["sid"]
+    want_tid = next((t for t, s in tid2sid.items() if s == want_sid), want_sid)
+    entries, endpoint = extract_posix(payloads, want_tid, flt)
+    if not entries:
+        raise SystemExit(f"no POSIX trace-stream entries for tid {want_tid}")
+    reg = build_registry(entries)
+    cpu_stats, proc_rows, nf, mode = compute_report(entries, sysinfo, reg,
+                                                    bsf_appid=bsf_appid, frame_ms=frame_ms)
+    meta = dict(meta or {})
+    # Expected BID from the project file (same format as the MCU report);
+    # insert right after the project row. There is no actual runtime BID in the
+    # stream to compare against (see stream_to_csv notes).
+    from timing_report import _decode_bid
+    bid = _decode_bid(sysinfo.get("bid"))
+    if bid:
+        ordered = {}
+        for k, v in meta.items():
+            ordered[k] = v
+            if k == "Project":
+                ordered["Expected BID"] = bid
+        if "Expected BID" not in ordered:
+            ordered["Expected BID"] = bid
+        meta = ordered
+    if mode == "synthetic":
+        print("WARNING: no thread config (TASK_IDS/TASK_NAME) in this capture -- it was "
+              "recorded mid-stream. Reporting per-CPU load over synthetic "
+              f"{frame_ms:g}ms windows (avg is accurate; min/max reflect the window grid). "
+              "Per-process/thread breakdown and the named BSF thread need a capture that "
+              "includes the startup config (record from boot, or pass --bsf-appid).",
+              file=sys.stderr)
+        meta["Framing"] = f"synthetic {frame_ms:g}ms windows (no config in capture)"
+    if csv_path:
+        write_csv(cpu_stats, proc_rows, sysinfo, nf, meta, csv_path)
+    if html_path:
+        write_html(cpu_stats, proc_rows, sysinfo, nf, meta, html_path)
+    return cpu_stats, proc_rows, nf, mode
+
+
+def main():
+    ap = argparse.ArgumentParser(description="POSIX/QNX trace stream -> per-CPU/thread BSF CPU-load report")
+    ap.add_argument("--pcap", required=True)
+    ap.add_argument("--project", required=True)
+    ap.add_argument("--sid", type=int, default=None)
+    ap.add_argument("--out", default=None)
+    ap.add_argument("--bsf-appid", type=int, default=None,
+                    help="App-Defined-Id of the BSF reference thread (for config-less "
+                         "captures where the thread name cannot be resolved)")
+    ap.add_argument("--frame-ms", type=float, default=20.0,
+                    help="synthetic window width (ms) when a capture has no thread config")
+    args = ap.parse_args()
+    sys.path.insert(0, __file__.rsplit("/", 1)[0])
+    import stream_to_csv as tss
+    payloads = tss.read_udp_payloads(args.pcap)
+    out = args.out or (args.pcap.rsplit(".", 1)[0] + "_posix_report.csv")
+    cpu_stats, proc_rows, nf, mode = report(payloads, args.project, args.sid, out,
+                                            meta={"Source": args.pcap.rsplit("/", 1)[-1]},
+                                            bsf_appid=args.bsf_appid, frame_ms=args.frame_ms)
+    lbl = {"bsf": "BSF frames", "appid": "BSF frames (--bsf-appid)",
+           "synthetic": "synthetic windows"}[mode]
+    print(f"[posix] {nf} {lbl}, {len(proc_rows)} processes -> {out}")
+    for c in sorted(cpu_stats):
+        mn, av, mx, n = cpu_stats[c]
+        print(f"    CPU{c}: min {mn:.2f}  avg {av:.2f}  max {mx:.2f}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
