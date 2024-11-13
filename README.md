@@ -115,3 +115,20 @@ the per-job population.
   sort).
 - Both carry provenance: source file, project file, build id, trace duration, capture time.
 
+## POSIX/QNX targets (`posix_report.py`)
+
+A POSIX/QNX target (project `SystemType="POSIX QNX"`, 24-bit clock) uses 64-bit
+entries and is handled separately. It reproduces the reference System report's
+**per-CPU** and **per-process/thread** BSF CPU load (min/avg/max).
+
+```sh
+python3 posix_report.py --pcap qnx.pcapng --project QNX.xml --out report.csv
+python3 stream_to_csv.py --pcap qnx.pcapng --project QNX.xml --report --html
+#   --bsf-appid N   BSF thread id for captures without the thread config
+#   --frame-ms MS   window width when no BSF thread can be resolved (default 20)
+```
+
+Scheduling model: SWITCH starts a run, WAIT idles the CPU, PREEMPT keeps the CPU busy
+until the next SWITCH (per-CPU load) but ends the thread's run (per-thread load).
+Frames that span a dropped datagram are excluded. A capture started mid-stream has no
+thread names/ids; the per-CPU load is then reported over fixed windows.
