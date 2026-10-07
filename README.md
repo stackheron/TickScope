@@ -132,3 +132,7 @@ Scheduling model: SWITCH starts a run, WAIT idles the CPU, PREEMPT keeps the CPU
 until the next SWITCH (per-CPU load) but ends the thread's run (per-thread load).
 Frames that span a dropped datagram are excluded. A capture started mid-stream has no
 thread names/ids; the per-CPU load is then reported over fixed windows.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
